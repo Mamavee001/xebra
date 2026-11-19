@@ -579,6 +579,34 @@ function Forwarded({
   );
 }
 
+export interface RelayerAnswer {
+  status?: string;
+  hash?: string;
+  reason?: string;
+}
+
+export function nextDelivery(
+  current: Delivery,
+  answer: RelayerAnswer | null | undefined,
+): Delivery {
+  if (current.kind === "done" || current.kind === "stuck") {
+    return current;
+  }
+  if (!answer) {
+    return { kind: "idle" };
+  }
+  if (answer.status === "delivered" || (answer.status === "submitted" && Boolean(answer.hash))) {
+    return { kind: "done", hash: answer.hash ?? null };
+  }
+  if (answer.status === "refused" || answer.status === "failed") {
+    return {
+      kind: "stuck",
+      message: answer.reason ?? "The mint could not be completed.",
+    };
+  }
+  return { kind: "idle" };
+}
+
 /**
  * A burn into Stellar: wait for Circle to attest it, then have the relayer finish the mint, or let
  * the sender finish it from a Stellar wallet. The same steps and screen as Sui to Stellar.
@@ -604,9 +632,12 @@ function ToStellar({
   const [claiming, setClaiming] = useState(false);
   const [claimError, setClaimError] = useState<string | null>(null);
   const completing = useRef(false);
+  const isTerminal = delivery.kind === "done" || delivery.kind === "stuck";
+  const deliveryRef = useRef(delivery);
+  deliveryRef.current = delivery;
 
   useEffect(() => {
-    if (delivery.kind === "done" || delivery.kind === "stuck") return;
+    if (isTerminal) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
 
@@ -639,27 +670,27 @@ function ToStellar({
         if (state === "complete" && relayerEnabled && !completing.current) {
           completing.current = true;
           setDelivery({ kind: "completing" });
-          const c = await fetch("/api/stellar-inbound/complete", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ src: APTOS_DOMAIN, tx }),
-          });
-          const result = (await c.json()) as { status?: string; hash?: string; reason?: string };
-          completing.current = false;
-          if (cancelled) return;
-          if (result.status === "delivered" || (result.status === "submitted" && result.hash)) {
-            setDelivery({ kind: "done", hash: result.hash ?? null });
-            remember(null);
-            return;
-          }
-          if (result.status === "refused" || result.status === "failed") {
-            setDelivery({
-              kind: "stuck",
-              message: result.reason ?? "The mint could not be completed.",
+          try {
+            const c = await fetch("/api/stellar-inbound/complete", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ src: APTOS_DOMAIN, tx }),
             });
-            return;
+            const result = (await c.json()) as RelayerAnswer;
+            const next = nextDelivery(deliveryRef.current, result);
+            setDelivery(next);
+            if (next.kind === "done") {
+              remember(null);
+              return;
+            }
+            if (next.kind === "stuck") {
+              return;
+            }
+          } catch {
+            setDelivery({ kind: "idle" });
+          } finally {
+            completing.current = false;
           }
-          setDelivery({ kind: "idle" });
         }
       } catch {
         completing.current = false;
@@ -673,7 +704,7 @@ function ToStellar({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [tx, delivery.kind, relayerEnabled]);
+  }, [tx, isTerminal, relayerEnabled]);
 
   async function onClaim() {
     if (!stellarAddress) return;
