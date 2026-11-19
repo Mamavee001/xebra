@@ -23,6 +23,7 @@ import {
   aptosWalletOnMainnet,
   currentAptosAccount,
   findAptosWallet,
+  readAptosSequenceNumber,
   signAndSubmitAptos,
 } from "../../lib/wallets/aptos";
 import { Button } from "../ui/button";
@@ -249,6 +250,8 @@ export function AptosBridgeForm({
       return;
     }
     setStep("preparing");
+    let senderAddress: string | undefined;
+    let envelope: AptosTxEnvelope | undefined;
     try {
       if ((await aptosWalletOnMainnet(wallet)) === false) {
         setError({
@@ -259,6 +262,7 @@ export function AptosBridgeForm({
       }
       // The account the wallet will sign with now, which may not be the one it connected with.
       const sender = (await currentAptosAccount(wallet)) ?? aptos.address;
+      senderAddress = sender;
       const res = await fetch("/api/aptos/build", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -287,7 +291,7 @@ export function AptosBridgeForm({
       }
       // Read back, shape-checked, and refused unless it burns native USDC.
       const args = aptosBurnArgsFromJson(body.transaction.arguments);
-      const envelope: AptosTxEnvelope = {
+      envelope = {
         sender: sender as `0x${string}`,
         sequenceNumber: BigInt(body.envelope.sequenceNumber),
         maxGasAmount: BigInt(body.envelope.maxGasAmount),
@@ -302,7 +306,29 @@ export function AptosBridgeForm({
       setSent(r);
     } catch (err) {
       const text = reportError("aptos burn failed", err);
-      setError({ text, declined: DECLINED.test(text) });
+      const declined = DECLINED.test(text);
+      if (declined) {
+        setError({ text, declined: true });
+      } else if (senderAddress && envelope) {
+        const nextSeq = await readAptosSequenceNumber(senderAddress).catch(() => null);
+        if (nextSeq !== null && nextSeq > envelope.sequenceNumber) {
+          setError({
+            text: "This transfer may have been sent. Check your wallet before trying again.",
+            declined: false,
+          });
+        } else if (nextSeq !== null && nextSeq <= envelope.sequenceNumber) {
+          const base = text.trim();
+          const sentence = base ? (base.endsWith(".") ? base : `${base}.`) : "";
+          setError({
+            text: sentence ? `${sentence} Nothing was sent.` : "Nothing was sent.",
+            declined: false,
+          });
+        } else {
+          setError({ text, declined: false });
+        }
+      } else {
+        setError({ text, declined: false });
+      }
     } finally {
       setStep("idle");
     }
