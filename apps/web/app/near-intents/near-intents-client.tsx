@@ -6,6 +6,7 @@ import {
   evmDestinationsFrom,
   evmSources,
   explorerTxUrl,
+  isEvmChainId,
 } from "@xebra/sdk/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "../../components/ui/badge";
@@ -69,7 +70,7 @@ interface Comparison {
   viaXebra: PathPrice & { hub?: string; xebra?: XebraQuote };
 }
 
-interface Tracked {
+export interface Tracked {
   /** The source chain; absent on swaps saved before other chains existed, which were Stellar. */
   from?: Source;
   depositAddress: string;
@@ -95,7 +96,7 @@ const STORAGE_KEY = "xebra.near-intents.tracked";
 const HUB_NAME: Record<string, string> = { base: "Base", arbitrum: "Arbitrum", solana: "Solana" };
 const HUBS = ["base", "arbitrum"] as const;
 
-type Source = "stellar" | EvmChainId;
+export type Source = "stellar" | EvmChainId;
 
 /** Stands in for the sender while pricing, before a wallet is connected. */
 const PLACEHOLDER_SENDER = {
@@ -129,10 +130,50 @@ function remember(t: Tracked | null) {
   }
 }
 
-function recall(): Tracked | null {
+/**
+ * Validates and parses a saved NEAR Intents swap from localStorage.
+ *
+ * Drops the saved value on anything unexpected: malformed JSON, a missing field, or a source chain
+ * this build does not recognize.
+ */
+export function parseTracked(raw: string | null): Tracked | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw);
+    if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+
+    const from = v.from;
+    const validFrom =
+      from === undefined || from === "stellar" || (typeof from === "string" && isEvmChainId(from));
+    if (!validFrom) return null;
+
+    if (typeof v.depositAddress !== "string" || !v.depositAddress.trim()) return null;
+    if (typeof v.tx !== "string" || !v.tx.trim()) return null;
+    if (typeof v.hub !== "string" || !v.hub.trim()) return null;
+    if (typeof v.expectOut !== "string" || !v.expectOut.trim()) return null;
+    if (typeof v.symbol !== "string" || !v.symbol.trim()) return null;
+
+    return {
+      ...(from !== undefined ? { from } : {}),
+      depositAddress: v.depositAddress,
+      tx: v.tx,
+      hub: v.hub,
+      expectOut: v.expectOut,
+      symbol: v.symbol,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function recall(): Tracked | null {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as Tracked) : null;
+    const parsed = parseTracked(raw);
+    if (raw && !parsed) {
+      window.localStorage.removeItem(STORAGE_KEY);
+    }
+    return parsed;
   } catch {
     return null;
   }
